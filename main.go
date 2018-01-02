@@ -2,20 +2,18 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
+	"os/signal"
 	"path"
-	"sort"
 	"strings"
+	"syscall"
 )
 
-const GEOLITE_ARCHIVE_URL = "http://geolite.maxmind.com/download/geoip/database/GeoLite2-City-CSV.zip"
-const GEOLITE_BLOCK_CSV_FILE = "GeoLite2-City-Blocks-IPv4.csv"
-const GEOLITE_CITY_CSV_FILE = "GeoLite2-City-Locations-en.csv"
+var ProgramName string
 
 var CityDB *CityDatabase
 var BlockDB *BlockDatabase
@@ -30,48 +28,42 @@ var inputFilename string
 var verboseMode bool
 var limitCount int
 var includeUnknown bool
+var formatter Formatter
+var formatterName string
+var fieldOrder string
+var fieldSeparator string
+var tcpAddress string
+var numGroups int
+var numGroupIteration int
 
-type PopulationEntry struct {
-	Name      string
-	Latitude  float32
-	Longitude float32
-	Count     int
-}
-
-type ByPopulation []PopulationEntry
-
-func (p ByPopulation) Len() int           { return len(p) }
-func (p ByPopulation) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
-func (p ByPopulation) Less(i, j int) bool { return p[i].Count > p[j].Count }
 func init() {
-	flag.StringVar(&dbURL, "u", GEOLITE_ARCHIVE_URL, "directory of GeoDB")
+	ProgramName = path.Base(os.Args[0])
+
+	flag.StringVar(&dbURL, "u", GEOLITE_ARCHIVE_URL, "url of MaxMind geolocation database (zip)")
 	flag.StringVar(&dbDirectory, "d", "", "directory of GeoDB")
 	flag.StringVar(&cityDBName, "c", GEOLITE_CITY_CSV_FILE, "city db filename")
 	flag.StringVar(&blockDBName, "b", GEOLITE_BLOCK_CSV_FILE, "block db filename")
 	flag.BoolVar(&noCleanUp, "n", false, "do not remove the downloaded files.")
 	flag.BoolVar(&verboseMode, "v", false, "quiet mode")
 	flag.BoolVar(&includeUnknown, "U", false, "do not remove unknown")
-	flag.IntVar(&limitCount, "l", -1, "print only top n elements")
+	flag.IntVar(&limitCount, "l", 1000, "print only top n elements")
 
 	flag.StringVar(&inputFilename, "i", "", "do not remove the downloaded files.")
-}
 
-func Err(exitStatus int, err error, format string, args ...interface{}) {
-	b := bytes.Buffer{}
+	flag.StringVar(&formatterName, "t", "csv", "formatter type: csv or text")
+	flag.StringVar(&fieldSeparator, "f", "\t", "field separator for text formatter")
+	flag.StringVar(&fieldOrder, "o", "name,pop,lat,lon,group", "field order of name, pop, lat, lon, and group")
 
-	b.WriteString("error: ")
-	b.WriteString(fmt.Sprintf(format, args...))
+	flag.StringVar(&tcpAddress, "T", "", "enable server mode, tcp address:port for listening socket")
+	flag.IntVar(&numGroups, "g", 5, "number of groups for clustering the output")
+	flag.IntVar(&numGroupIteration, "G", 20, "number of iteration for grouping/clustering")
 
-	if err != nil {
-		b.WriteString(fmt.Sprintf(": %v", err))
-	}
-
-	os.Stdout.Sync()
-	fmt.Fprintf(os.Stderr, "%s\n", b.String())
-	os.Stderr.Sync()
-
-	if exitStatus != 0 {
-		os.Exit(exitStatus)
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [OPTION...]\n", ProgramName)
+		fmt.Fprintf(os.Stderr, "Print Geolocation of given IP addresses\n")
+		fmt.Fprintf(os.Stderr, "\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\n")
 	}
 }
 
@@ -86,6 +78,16 @@ func main() {
 	log.Printf("blockDBName: %v", blockDBName)
 	log.Printf("os.Args: %v", os.Args)
 	log.Printf("flag.Args: %v", flag.Args())
+	log.Printf("formatter: %v", formatterName)
+	log.Printf("fieldOrder: %v", fieldOrder)
+	log.Printf("nGroup: %v", numGroups)
+	log.Printf("nGroupIteration: %v", numGroupIteration)
+	log.Printf("limitCount: %v", limitCount)
+
+	formatter, err := NewFormatter(formatterName, fieldOrder, fieldSeparator)
+	if err != nil {
+		Err(1, err, "cannot create a formatter")
+	}
 
 	downloader := Downloader{}
 	if dbDirectory == "" {
@@ -99,10 +101,6 @@ func main() {
 		}
 
 		dbDirectory = downloader.Base
-
-		if noCleanUp {
-			defer downloader.Close()
-		}
 	}
 
 	if inputFilename == "" {
@@ -116,8 +114,7 @@ func main() {
 		inputFile = f
 	}
 
-	var err error
-	CityDB, err = NewCityDatabase(path.Join(dbDirectory, cityDBName))
+	CityDB, err := NewCityDatabase(path.Join(dbDirectory, cityDBName))
 	if err != nil {
 		Err(1, err, "cannot load city database")
 	}
@@ -126,63 +123,64 @@ func main() {
 		Err(1, err, "cannot load block database")
 	}
 
+	server := NewServer()
+	server.Start()
+	if tcpAddress != "" {
+		server.AddListener("tcp", tcpAddress)
+		fmt.Fprintf(os.Stderr, "server ready\n")
+	}
+	defer server.Close()
+
 	scanner := bufio.NewScanner(inputFile)
-	population := map[string]PopulationEntry{}
 
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		// fmt.Fprintf(os.Stderr, "# line: %s\n", line)
+	signalChannel := make(chan os.Signal, 1)
+	signal.Notify(signalChannel, os.Interrupt)
+	signal.Notify(signalChannel, os.Kill)
 
-		if line == "" {
-			continue
+	stdinDone := make(chan struct{})
+	go func() {
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			// fmt.Fprintf(os.Stderr, "# line: %s\n", line)
+			if line == "" {
+				continue
+			}
+
+			server.Incoming <- LocationRequest{Address: line}
+		}
+		if err := scanner.Err(); err != nil {
+			Err(1, err, "reading the file %v", inputFile.Name())
 		}
 
-		entry, err := BlockDB.Search(line)
-		if err != nil && verboseMode {
-			Err(0, err, "no entry for %s, ignored", line)
-			continue
+		done := make(chan struct{})
+		NewFormatter(formatterName, fieldOrder, fieldSeparator)
+		server.Incoming <- StatisticRequest{
+			Limit:             limitCount,
+			Stream:            os.Stdout,
+			Formatter:         formatter,
+			Done:              done,
+			Groups:            numGroups,
+			MaxGroupIteration: numGroupIteration,
 		}
+		<-done
+		close(stdinDone)
+	}()
 
-		co, ci := entry.City.Country, entry.City.Name
-		if !includeUnknown && (co == "" || ci == "") {
-			continue
+	select {
+	case <-stdinDone:
+		if !noCleanUp {
+			downloader.Close()
 		}
+	case c := <-signalChannel:
+		if !noCleanUp {
+			downloader.Close()
+		}
+		fmt.Fprintf(os.Stderr, "received a signal: %v\n", c)
 
-		if co == "" {
-			co = "UNKNOWN"
-		}
-		if ci == "" {
-			ci = "UNKNOWN"
-		}
-
-		key := fmt.Sprintf("%v: %v", co, ci)
-		if ent, ok := population[key]; ok {
-			ent.Count += 1
-			population[key] = ent
+		if sig, ok := c.(syscall.Signal); ok {
+			os.Exit(128 + int(sig))
 		} else {
-			population[key] = PopulationEntry{Name: key, Count: 1, Latitude: entry.Latitude, Longitude: entry.Longitude}
+			os.Exit(128)
 		}
-
-	}
-	if err := scanner.Err(); err != nil {
-		Err(1, err, "reading the file %v", inputFile.Name())
-	}
-
-	fmt.Printf("name,pop,lat,lon\n")
-	// for k, v := range population {
-	// 	fmt.Printf("'%v',%v,%v,%v\n", k, v.Count, v.Longitude, v.Latitude)
-	// }
-
-	entries := make([]PopulationEntry, 0, len(population))
-	for _, v := range population {
-		entries = append(entries, v)
-	}
-	sort.Sort(ByPopulation(entries))
-
-	if limitCount < 0 {
-		limitCount = len(entries)
-	}
-	for i := 0; i < limitCount; i++ {
-		fmt.Printf("\"%v\",%v,%v,%v\n", entries[i].Name, entries[i].Count, entries[i].Latitude, entries[i].Longitude)
 	}
 }

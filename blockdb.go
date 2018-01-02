@@ -18,6 +18,7 @@ type BlockEntry struct {
 	Latitude  float32
 	Longitude float32
 	City      CityEntry
+	Error     error
 }
 
 type ByBegin []BlockEntry

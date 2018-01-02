@@ -11,6 +11,10 @@ import (
 	"path"
 )
 
+const GEOLITE_ARCHIVE_URL = "http://geolite.maxmind.com/download/geoip/database/GeoLite2-City-CSV.zip"
+const GEOLITE_BLOCK_CSV_FILE = "GeoLite2-City-Blocks-IPv4.csv"
+const GEOLITE_CITY_CSV_FILE = "GeoLite2-City-Locations-en.csv"
+
 type Downloader struct {
 	URL     string
 	Archive string
