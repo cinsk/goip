@@ -256,6 +256,7 @@ func (s *Server) Close() error {
 }
 
 func (s *Server) AddListener(network string, laddr string) error {
+	log.Printf("Listening on %v, %v", network, laddr)
 	ln, err := net.Listen(network, laddr)
 	if err != nil {
 		return err

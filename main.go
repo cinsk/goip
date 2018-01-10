@@ -125,7 +125,9 @@ func main() {
 
 	server := NewServer()
 	server.Start()
+
 	if tcpAddress != "" {
+		log.Printf("TCP address: %v", tcpAddress)
 		server.AddListener("tcp", tcpAddress)
 		fmt.Fprintf(os.Stderr, "server ready\n")
 	}
