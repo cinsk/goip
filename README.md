@@ -128,6 +128,9 @@ It also supports `.stat` command that will give you the same statisticial output
 
 Note that `.stat` command is very expensive, and `goip` does not handle more than 1 request at a time.  If you're looking for a sturdy server for querying geolocation, consider to use other solution such as [freegeoip](https://github.com/fiorix/freegeoip).
 
+Demo
+----
 
+Look at the article [Visualize IP on World Map](http://www.joyent.com/blog/visualize-ip-world-map) for `goip` usecase.
 
-
+![visualization of world map](./examples/bubble-map.png)
