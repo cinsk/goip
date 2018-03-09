@@ -7,6 +7,10 @@ import sys
 LIMIT = 1000
 SCALE = 10
 
+if sys.version_info >= (3, 0):
+    def xrange(arg, *rest):
+        return range(arg, *rest)
+    
 df = pd.read_csv(sys.argv[1], quotechar='"')
 
 df['text'] = df['name'] + '<br>Population ' + (df['pop']).astype(str)
@@ -21,7 +25,7 @@ if not 'group' in df:
     df['group'] = 0
 
 for level in xrange(5):
-    print "level: ", level
+    # print ("level: ", level)
     try:
         maxval = df.loc[df['group'] == level].sort_values(by='pop').head(1)['pop'].iloc[0]
         minval = df.loc[df['group'] == level].sort_values(by='pop').tail(1)['pop'].iloc[0]
@@ -29,7 +33,7 @@ for level in xrange(5):
     except IndexError:
         pass
     
-print "LIMITS: ", limits
+# print ("LIMITS: ", limits)
 colors.reverse()
 
 for i in range(len(limits)):
